@@ -113,6 +113,13 @@ object TelemetryServer {
 
     private fun route(method: String, path: String, params: Map<String, String>, body: String): Pair<Int, String> {
         return when {
+            path == "/" -> 200 to """{"ok":true,"name":"hw_monitor telemetry server","endpoints":[
+                |"GET /health","GET /telemetry?pid=&name=","GET /ls?path=",
+                |"GET /predict?repo=&file=","GET /predict_local?path=",
+                |"GET /hf_search?q=&limit=","GET /hf_files?repo=","GET /bench",
+                |"POST /run {\"cmd\":\"...\"}","GET /run/status?pid=",
+                |"GET /infer?model=&prompt=&n=&profile=1","GET /infer/result"
+                |]}""".trimMargin().replace("\n", "")
             path == "/health" -> 200 to """{"ok":true,"port":$PORT}"""
             path == "/telemetry" && method == "GET" -> 200 to telemetryJson(params)
             path == "/run" && method == "POST" -> runCommand(body)
@@ -123,6 +130,8 @@ object TelemetryServer {
             path == "/hf_files" && method == "GET" -> hfFiles(params)
             path == "/bench" && method == "GET" -> runBench()
             path == "/ls" && method == "GET" -> lsPath(params)
+            path == "/infer" && method == "GET" -> startInfer(params)
+            path == "/infer/result" && method == "GET" -> inferResult(params)
             else -> 404 to """{"error":"not found","path":"$path"}"""
         }
     }
@@ -303,6 +312,82 @@ object TelemetryServer {
         } catch (e: Exception) {
             500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
         }
+    }
+
+    // -- /infer : lance une VRAIE inference avec le moteur ggml deja
+    // compile+patche ce jour (E:/oneplus/ab-build-opencl-prof, pousse sur le
+    // device a /data/local/tmp/opencl_prof/bin/ et /data/local/tmp/rt_clean/
+    // bin/) — MEME approche que oneplus-llm-agent (ton app existante,
+    // RuntimeController.kt/LlamaServerClient.kt) : sous-processus root via
+    // ProcessBuilder, PAS de JNI. Reutilise /run (deja existant) en interne.
+
+    private object InferState {
+        @Volatile var pid: Int? = null
+        @Volatile var outputDir: String? = null
+        @Volatile var backend: String? = null
+    }
+
+    private fun startInfer(params: Map<String, String>): Pair<Int, String> {
+        val model = params["model"] ?: return 400 to """{"error":"missing ?model= (chemin .gguf sur le device)"}"""
+        val prompt = (params["prompt"] ?: "Bonjour").replace("'", "'\\''")
+        val n = params["n"]?.toIntOrNull() ?: 32
+        val backend = params["backend"] ?: "gpu" // gpu | cpu | htp | pingpong
+
+        val (binDir, envVars, ngl) = when (backend) {
+            "cpu" -> Triple("/data/local/tmp/opencl_prof/bin", "GGML_CPU_PROFILE=1", 0)
+            "gpu" -> Triple("/data/local/tmp/opencl_prof/bin", "", 99)
+            "htp" -> Triple("/data/local/tmp/rt_clean/bin", "GGML_HEXAGON_PROFILE=1", 99)
+            "pingpong" -> Triple("/data/local/tmp/opencl_prof/bin", "GGML_BACKEND_COPY_PROFILE=1", params["ngl"]?.toIntOrNull() ?: 10)
+            else -> return 400 to """{"error":"backend inconnu '$backend' (attendu : gpu, cpu, htp, pingpong)"}"""
+        }
+        val binName = if (backend == "htp") "llama-cli" else "llama"
+        val subcmd = if (backend == "htp") "" else "cli "
+        val cmd = "cd $binDir && rm -f cpu_profiling.csv cl_profiling.csv backend_copy_profile.csv prof.log && " +
+                "$envVars LD_LIBRARY_PATH=. ./$binName ${subcmd}-m '$model' -ngl $ngl -p '$prompt' -n $n --single-turn " +
+                (if (backend == "htp") "-lv 5 > prof.log 2>&1" else "> run_out.log 2>&1")
+
+        return try {
+            val p = ProcessBuilder("sh", "-c", "echo \$\$; exec $cmd").redirectErrorStream(true).start()
+            val firstLine = BufferedReader(InputStreamReader(p.inputStream)).readLine()
+            val pid = firstLine?.trim()?.toIntOrNull()
+                ?: return 500 to """{"error":"impossible de recuperer le pid"}"""
+            InferState.pid = pid
+            InferState.outputDir = binDir
+            InferState.backend = backend
+            200 to """{"started":true,"pid":$pid,"backend":"$backend","outputDir":"$binDir","note":"appeler /infer/result une fois le run termine (verifier via /run/status?pid=$pid)"}"""
+        } catch (e: Exception) {
+            500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
+        }
+    }
+
+    /** Lit et resume (SANS le parseur riche Python) le fichier de trace
+     *  produit par le dernier /infer. Resume minimal : nombre de lignes,
+     *  taille, apercu — pour une analyse complete, pull le fichier et
+     *  utiliser parse_opencl_profile.py / parse_hexagon_profile.py /
+     *  parse_backend_copy_profile.py sur PC (pas encore portes en Kotlin). */
+    private fun inferResult(params: Map<String, String>): Pair<Int, String> {
+        val backend = params["backend"] ?: InferState.backend
+            ?: return 400 to """{"error":"aucun /infer lance, ou preciser ?backend="}"""
+        val dir = InferState.outputDir ?: when (backend) {
+            "htp" -> "/data/local/tmp/rt_clean/bin"
+            else -> "/data/local/tmp/opencl_prof/bin"
+        }
+        val fileName = when (backend) {
+            "cpu" -> "cpu_profiling.csv"
+            "gpu" -> "cl_profiling.csv"
+            "pingpong" -> "backend_copy_profile.csv"
+            "htp" -> "prof.log"
+            else -> return 400 to """{"error":"backend inconnu"}"""
+        }
+        val f = java.io.File(dir, fileName)
+        if (!f.exists()) {
+            return 200 to """{"ready":false,"path":"${f.path}","note":"pas encore genere — le run est-il termine ? verifier /run/status"}"""
+        }
+        val lines = try { f.readLines() } catch (e: Exception) {
+            return 500 to """{"error":"${(e.message ?: "lecture impossible").replace("\"", "'")}"}"""
+        }
+        val preview = lines.take(5).joinToString("\\n") { it.replace("\"", "'") }
+        return 200 to """{"ready":true,"path":"${f.path}","sizeBytes":${f.length()},"nLines":${lines.size},"preview":"$preview","note":"analyse complete : pull ce fichier et utiliser parse_opencl_profile.py / parse_hexagon_profile.py / parse_backend_copy_profile.py sur PC"}"""
     }
 
     private fun lsPath(params: Map<String, String>): Pair<Int, String> {
