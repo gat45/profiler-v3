@@ -117,6 +117,11 @@ object TelemetryServer {
             path == "/telemetry" && method == "GET" -> 200 to telemetryJson(params)
             path == "/run" && method == "POST" -> runCommand(body)
             path == "/run/status" && method == "GET" -> runStatus(params)
+            path == "/predict" && method == "GET" -> predictHf(params)
+            path == "/predict_local" && method == "GET" -> predictLocal(params)
+            path == "/hf_search" && method == "GET" -> hfSearch(params)
+            path == "/hf_files" && method == "GET" -> hfFiles(params)
+            path == "/bench" && method == "GET" -> runBench()
             else -> 404 to """{"error":"not found","path":"$path"}"""
         }
     }
@@ -243,6 +248,79 @@ object TelemetryServer {
         val pid = params["pid"]?.toIntOrNull() ?: return 400 to """{"error":"missing pid"}"""
         val alive = java.io.File("/proc/$pid").exists()
         return 200 to """{"pid":$pid,"alive":$alive}"""
+    }
+
+    // -- /predict (HuggingFace, sans telechargement) et /predict_local -----
+
+    private fun predictHf(params: Map<String, String>): Pair<Int, String> {
+        val repo = params["repo"] ?: return 400 to """{"error":"missing ?repo="}"""
+        val file = params["file"] ?: return 400 to """{"error":"missing ?file="}"""
+        return try {
+            renderPrediction(HfPredictor.predict(repo, file))
+        } catch (e: Exception) {
+            500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
+        }
+    }
+
+    private fun predictLocal(params: Map<String, String>): Pair<Int, String> {
+        val path = params["path"] ?: return 400 to """{"error":"missing ?path= (chemin .gguf local)"}"""
+        return try {
+            renderPrediction(HfPredictor.predictLocalFile(path))
+        } catch (e: Exception) {
+            500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
+        }
+    }
+
+    private fun hfSearch(params: Map<String, String>): Pair<Int, String> {
+        val q = params["q"] ?: return 400 to """{"error":"missing ?q= (terme de recherche)"}"""
+        val limit = params["limit"]?.toIntOrNull() ?: 15
+        return try {
+            val hits = HfPredictor.searchModels(q, limit)
+            val arr = hits.joinToString(",") {
+                """{"id":"${it.id}","downloads":${it.downloads},"likes":${it.likes}}"""
+            }
+            200 to """{"query":"$q","results":[$arr]}"""
+        } catch (e: Exception) {
+            500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
+        }
+    }
+
+    private fun hfFiles(params: Map<String, String>): Pair<Int, String> {
+        val repo = params["repo"] ?: return 400 to """{"error":"missing ?repo="}"""
+        return try {
+            val files = HfPredictor.listGgufFiles(repo)
+            200 to """{"repo":"$repo","files":[${files.joinToString(",") { "\"$it\"" }}]}"""
+        } catch (e: Exception) {
+            500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
+        }
+    }
+
+    private fun runBench(): Pair<Int, String> {
+        return try {
+            val r = DeviceBench.run()
+            200 to DeviceBench.toDeviceConfigJson(r, android.os.Build.MODEL)
+        } catch (e: Exception) {
+            500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
+        }
+    }
+
+    private fun renderPrediction(p: HfPrediction): Pair<Int, String> {
+        val byFamilyJson = p.bytesByFamily.entries.joinToString(",") { (k, v) -> "\"$k\":$v" }
+        val json = """{
+            |"repoId":"${p.repoId}","filename":"${p.filename}",
+            |"architecture":"${p.architecture}","nLayers":${p.nLayers},
+            |"hiddenSize":${p.hiddenSize},"nExperts":${p.nExperts},"topK":${p.topK},
+            |"totalBytes":${p.totalBytes},"totalGb":${p.totalBytes / 1e9},
+            |"bytesByFamily":{$byFamilyJson},
+            |"bytesPerTokenGb":${p.bytesPerTokenGb},
+            |"l3ColdTpsRaw":${p.l3ColdTpsRaw},
+            |"correctionFactor":${p.correctionFactor},
+            |"correctionConfidence":"${p.correctionConfidence}",
+            |"correctionNote":"${p.correctionNote.replace("\"", "'")}",
+            |"correctedTps":${p.correctedTps},
+            |"warning":"modele roofline SIMPLIFIE (pas le simulateur L3 complet de profile_model.py) — voir HfPredictor.kt"
+            |}""".trimMargin().replace("\n", "")
+        return 200 to json
     }
 
     // -- utilitaires HTTP minimalistes ----------------------------------
