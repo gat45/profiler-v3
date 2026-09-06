@@ -1,0 +1,206 @@
+# PROFILE — saftensore 9b
+
+- format : safetensors (BF16) · 775 tenseurs · BF16 18.0 GiB
+- archi : 32 couches · hidden 4096 · vocab 248320 · tied False · vision True
+- attention : 8 full [3, 7, 11, 15, 19, 23, 27, 31] · 0 sliding (win 0)
+
+## 1. Répartition par famille (BF16)
+| famille | tensors | GiB | part % |
+|---|---:|---:|---:|
+| mlp | 207 | 9.78 | 54.4 |
+| attn | 336 | 4.26 | 23.7 |
+| lm_head | 1 | 1.89 | 10.5 |
+| embed | 1 | 1.89 | 10.5 |
+| other | 7 | 0.08 | 0.5 |
+| mtp | 1 | 0.06 | 0.3 |
+| norm | 222 | 0.00 | 0.0 |
+
+## 2. Tailles de déploiement (GiB)
+| format | complet | texte seul | vs 9.0 Go libres |
+|---|---:|---:|---|
+| F16 | 18.0 | 18.0 | NON |
+| Q8_0 | 9.6 | 9.6 | NON |
+| Q6_K | 7.4 | 7.4 | OUI |
+| Q5_K | 6.2 | 6.2 | OUI |
+| Q4_K | 5.1 | 5.1 | OUI |
+| Q4_0 | 5.1 | 5.1 | OUI |
+| Q3_K | 3.9 | 3.9 | OUI |
+| Q2_K | 2.9 | 2.9 | OUI |
+| IQ3_XXS | 4.2 | 4.2 | OUI |
+| IQ2_XXS | 2.3 | 2.3 | OUI |
+| IQ1_S | 1.8 | 1.8 | OUI |
+
+## 3. Actifs / trafic décode / débit
+- actifs/token : 8.56B poids BF16 (15.94 GiB)
+- KV cache/token : 128 Ko (@ctx 4096 : 512 Mo)
+- lm_head : 1.89 GiB (Q4_0 546 Mo/token)
+- orchestration : 224 ops/token × 215 µs = 48.2 ms/token (borne fixe HTP)
+
+| format | trafic Q4_0 GiB/token | GGML 30 Go/s | GGML 32,4 | QAIRT 74 | régime dense 57 | régime MoE 14,3 |
+|---|---:|---:|---:|---:|---:|---:|
+| F16 | 15.94 | 1.8 | 1.9 | 4.3 | 3.3 | 0.8 |
+| Q8_0 | 8.47 | 3.3 | 3.6 | 8.1 | 6.3 | 1.6 |
+| Q6_K | 6.54 | 4.3 | 4.6 | 10.5 | 8.1 | 2.0 |
+| Q5_K | 5.48 | 5.1 | 5.5 | 12.6 | 9.7 | 2.4 |
+| Q4_K | 4.48 | 6.2 | 6.7 | 15.4 | 11.8 | 3.0 |
+| Q4_0 | 4.48 | 6.2 | 6.7 | 15.4 | 11.8 | 3.0 |
+| Q3_K | 3.42 | 8.2 | 8.8 | 20.1 | 15.5 | 3.9 |
+| Q2_K | 2.62 | 10.7 | 11.5 | 26.4 | 20.3 | 5.1 |
+| IQ3_XXS | 3.74 | 7.5 | 8.1 | 18.4 | 14.2 | 3.6 |
+| IQ2_XXS | 2.05 | 13.6 | 14.7 | 33.5 | 25.8 | 6.5 |
+| IQ1_S | 1.56 | 17.9 | 19.4 | 44.3 | 34.1 | 8.6 |
+
+## 4. Plan quant sous contrainte RAM
+| famille | format plan | GiB |
+|---|---:|---:|
+| mlp | Q4_0 | 2.75 |
+| attn | Q4_0 | 1.20 |
+| embed | Q8_0 | 1.01 |
+| lm_head | Q8_0 | 1.01 |
+| other | Q8_0 | 0.04 |
+| mtp | Q8_0 | 0.03 |
+| norm | F16 | 0.00 |
+**Total plan : 6.0 GiB → RENTRE dans 9.0 Go libres**
+
+## 5. Verdict
+- Q4_0 complet 5.1 GiB ≤ 9.0 Go → **PROFILABLE HTP** (Q4_0 = seule précision NPU)
+- débit decode probable Q4_0 : 11.8-6.2 t/s (trafic-bound GGML)
+
+## 6. Simulation Hextimate L3 (RE Qualcomm : roofline + VTCM + spill + dispatch)
+- modèle : T_layer = max(compute, mémoire×spill) + dispatch · VTCM 8 Mo seuil 75% · peak 61.65 TFLOPS · BW_eff 50.0 Go/s · dispatch 215 µs/op · thermique x0.65
+- layers simulés : 33 · spill actif sur 0 layers · latence totale 114.1 ms/token
+- flops/token 34230 MFLOPS · bytes/token 5479 Mo · intensité arithmétique 6.40 FLOPS/octet
+- **t/s L3 (froid) : 8.8 · soutenu (thermique) : 5.7 · bottleneck dominant : MEMORY
+
+| layer | type | poids Q4 Mo | KV Mo | spill | compute ms | mémoire ms | dispatch ms | expert ms | latence ms |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 00 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 01 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 02 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 03 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 04 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 05 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 06 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 07 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 08 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 09 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 10 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 11 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 12 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 13 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 14 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 15 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 16 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 17 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 18 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 19 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 20 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 21 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 22 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 23 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 24 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 25 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 26 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 27 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 28 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 29 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 30 | dense   | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| 31 | full    | 126 | 16.0 | x1.00 | 15.3 µs | 2987 µs | 0.21 | — | 3.20 |
+| lm_head | tied    | 546 | 0.0 | x1.00 | 66.0 µs | 11443 µs | 0.21 | — | 11.66 |
+
+## Note : section 3 (orchestration) vs section 6 (L3) ne se comparent PAS
+
+- section 3 : 224 ops/token x 215us = 48.2 ms (=20.8 t/s si lu a tort comme une prediction) — c'est une borne PATHOLOGIQUE (aucun regroupement d'ops), PAS une prediction.
+- section 6 (L3, a retenir) : 114.1 ms (=8.8 t/s) — calibree sur une mesure reelle (29 dispatchs FastRPC/token mesures sur Marco, pas 224).
+Les deux chiffres NE DOIVENT JAMAIS etre compares directement — ils ne modelisent pas la meme granularite de dispatch. Le t/s a citer est toujours celui de la section 6 (L3) / --bounds, jamais 1000/orchestration_ms.
+
+## Plan de quant SECURISE (anti-OOM + compatibilite backend)
+
+- budget nominal : 9.0 Go · marge securite : 1.5 Go · **budget effectif : 7.5 Go**
+- backend cible : HTP
+| famille | format | GiB |
+|---|---:|---:|
+| mlp | Q4_0 | 2.75 |
+| attn | Q4_0 | 1.20 |
+| embed | Q8_0 | 1.01 |
+| lm_head | Q8_0 | 1.01 |
+| other | Q8_0 | 0.04 |
+| mtp | Q8_0 | 0.03 |
+| norm | F16 | 0.00 |
+**Total : 6.04 GiB — OK (sous budget effectif)**
+
+### Leviers runtime recommandes (hors quantization)
+- `GGML_HEXAGON_OPPOLL=1` — gain mesure : +50% (32.47 vs 21.4-22.3 t/s, Marco-Nano, self-build-jz, 2026-09-05/06) (validation : 1 modele, 1 build — a confirmer sur d'autres modeles/tailles avant de le considerer acquis partout ; risque : aucun observe a ce jour (pas de correction degradee constatee))
+
+## Modele Hextimate-like — bornes lower/upper (pas un point unique)
+
+- contention appliquee : x1.00 sur le terme memoire (1.0 = NPU seul, cf. mesures co-execution GPU+NPU 2026-09-05/06)
+- **t/s si AUCUN chevauchement (upper bound temps = pire cas) : 8.7 t/s**
+- **t/s si chevauchement TOTAL (lower bound temps = meilleur cas) : 8.8 t/s**
+- plage predite : [8.7, 8.8] t/s
+
+Lecture : contrairement a un point unique (l'original), une plage donne un test de coherence direct — un t/s mesure hors de [lower, upper] signale un terme manquant (ex. RPC/queue/synchronisation non modelise), pas juste une mauvaise valeur de BW_EFF.
+
+## Regime device reel : NON APPLIQUE
+
+Aucun --device-meta fourni — le "soutenu (thermique)" ci-dessus reste la constante FIXE de l'original (x0.65), qui ne reflete PAS l'etat reel du device au moment du profilage. Fournir --device-meta <fichier> (meme format que celui lu par predictor.parse_meta : model=/mWakefulness_before=/scaling_max_freq_before=/mem_available_kb=/loadavg=) pour une estimation "soutenu" reflet de l'etat reel plutot que d'une moyenne generique.
+
+## Prediction quant PAR COUCHE avec impact inter-couches (budget partage)
+
+- budget effectif : 7.50 Go
+- total alloue (familles HTP-offloadables uniquement) : 7.44 Go
+- qualite proxy (bits ponderes par octet — PAS une perplexite mesuree, aucune donnee imatrix/ppl disponible) : 12.32 bits/poids
+- [SANS TRACE LIVE] la colonne 'cout mesure' ci-dessous est absente — l'ordre de priorite ne s'appuie que sur le ratio qualite/Go, pas sur l'importance reelle de la couche pour le debit
+
+| ordre | couche | avant | apres | +Go | Go cumules | part du temps mesure | raison |
+|---:|---:|---|---|---:|---:|---:|---|
+| 1 | 11 | Q4_0 | Q8_0 | 0.098 | 3.83 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 2 | 11 | Q8_0 | F16 | 0.183 | 4.02 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 3 | 15 | Q4_0 | Q8_0 | 0.098 | 4.11 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 4 | 15 | Q8_0 | F16 | 0.183 | 4.30 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 5 | 19 | Q4_0 | Q8_0 | 0.098 | 4.39 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 6 | 19 | Q8_0 | F16 | 0.183 | 4.58 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 7 | 23 | Q4_0 | Q8_0 | 0.098 | 4.67 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 8 | 23 | Q8_0 | F16 | 0.183 | 4.86 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 9 | 27 | Q4_0 | Q8_0 | 0.098 | 4.96 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 10 | 27 | Q8_0 | F16 | 0.183 | 5.14 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 11 | 3 | Q4_0 | Q8_0 | 0.098 | 5.24 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 12 | 3 | Q8_0 | F16 | 0.183 | 5.42 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 13 | 31 | Q4_0 | Q8_0 | 0.098 | 5.52 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 14 | 31 | Q8_0 | F16 | 0.183 | 5.70 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 15 | 7 | Q4_0 | Q8_0 | 0.098 | 5.80 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 16 | 7 | Q8_0 | F16 | 0.183 | 5.98 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 17 | 1 | Q4_0 | Q8_0 | 0.102 | 6.08 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 18 | 1 | Q8_0 | F16 | 0.191 | 6.27 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 19 | 10 | Q4_0 | Q8_0 | 0.102 | 6.37 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 20 | 10 | Q8_0 | F16 | 0.191 | 6.57 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 21 | 12 | Q4_0 | Q8_0 | 0.102 | 6.67 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 22 | 12 | Q8_0 | F16 | 0.191 | 6.86 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 23 | 13 | Q4_0 | Q8_0 | 0.102 | 6.96 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 24 | 13 | Q8_0 | F16 | 0.191 | 7.15 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 25 | 14 | Q4_0 | Q8_0 | 0.102 | 7.25 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+| 26 | 14 | Q8_0 | F16 | 0.191 | 7.44 | — | meilleur ratio qualite-proxy/Go disponible a cet instant |
+
+**Impact direct sur les autres couches (ce qui n'a PAS pu etre fait, faute de budget deja consomme par les decisions ci-dessus) :**
+- couche 16 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 17 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 18 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 2 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 20 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 21 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 22 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 24 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 25 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 26 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 28 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 29 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 30 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 4 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 5 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 6 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 8 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 9 : aurait pu monter a Q8_0 pour +0.102 Go supplementaires
+- couche 0 : aurait pu monter a Q8_0 pour +0.199 Go supplementaires
+
+### Debit (t/s) — avertissement explicite, PAS une prediction
+Ce plan optimise RAM vs qualite-proxy (bits), **jamais le debit**. Precedent verifie (`RAPPORT_DECISIF_ABC_Q8_Q4_MXFP4_MEMORYWALL_20260831.md`, Qwen3.5-9B-D2-A, attention seule, protocole controle) : Q8_0->Q4_0 (-47% octets attn, MUL_MAT -17%, DSP total -14%) a fait **BAISSER** le decode de 8% (5.86 vs 6.39 t/s) — pas augmenter comme on l'attendrait naivement. Q4_0->MXFP4 (octets/DSP quasi identiques, -1%/=) a donne **+13%** (6.64 t/s). Conclusion verifiee : le debit depend du CHEMIN D'EXECUTION (tiling/kernel dequant), pas seulement du nombre de bits des poids — ce module ne pretend donc pas predire un gain de t/s par couche, seulement RAM et qualite-proxy. Mesurer le t/s reel avant/apres tout changement de --tensor-type-file reste indispensable.

@@ -1,0 +1,7 @@
+model=Qwen3-0.9B-A0.6B.i1-Q4_0.gguf
+mWakefulness_before=Awake
+scaling_max_freq_before=2361600/1862400
+mem_available_kb=9520712
+loadavg=5.27
+env_hexagon=GGML_HEXAGON_OPPOLL=1
+thermal_zones=thermal_zone47:31400,thermal_zone28:31800,thermal_zone32:30600
