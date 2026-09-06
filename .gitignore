@@ -1,2 +1,10 @@
 __pycache__/
 *.pyc
+
+# Android (android/hw_monitor)
+build/
+.gradle/
+local.properties
+*.apk
+*.iml
+.idea/

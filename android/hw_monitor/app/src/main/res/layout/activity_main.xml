@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:padding="16dp">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="HW Monitor — SM8850"
+        android:textSize="20sp"
+        android:textStyle="bold" />
+
+    <TextView
+        android:id="@+id/tvStatus"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="4dp"
+        android:text="● temps réel (1 Hz)"
+        android:textSize="13sp" />
+
+    <TextView
+        android:id="@+id/tvCpu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:fontFamily="monospace"
+        android:text="CPU  : --"
+        android:textSize="18sp" />
+
+    <TextView
+        android:id="@+id/tvGpu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:text="GPU  : --"
+        android:textSize="18sp" />
+
+    <TextView
+        android:id="@+id/tvNpu"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:text="NPU  : --"
+        android:textSize="18sp" />
+
+    <TextView
+        android:id="@+id/tvTemp"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="20dp"
+        android:fontFamily="monospace"
+        android:text="TEMP : --"
+        android:textSize="16sp" />
+
+    <TextView
+        android:id="@+id/tvRam"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:text="RAM  : --"
+        android:textSize="16sp" />
+
+    <TextView
+        android:id="@+id/tvBatt"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:fontFamily="monospace"
+        android:text="BATT : --"
+        android:textSize="16sp" />
+
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="24dp"
+        android:text="NPU % : proxy thermique (nsphvx) — aucune lecture directe d'util NPU en sysfs sur SM8850. 45°C≈idle, 90°C≈charge."
+        android:textSize="12sp" />
+
+    <TextView
+        android:id="@+id/tvServer"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:fontFamily="monospace"
+        android:text="SERVEUR : --"
+        android:textSize="14sp" />
+
+    <Button
+        android:id="@+id/btnToggleServer"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Demarrer/Arreter le serveur telemetrie" />
+
+</LinearLayout>
