@@ -259,13 +259,59 @@ object HfPredictor {
 
     /** Meme pipeline que predict() mais sur un GGUF DEJA PRESENT localement
      *  sur le device (ex /data/local/tmp/...) — lit juste les premiers
-     *  octets du fichier, jamais le poids complet. */
-    fun predictLocalFile(path: String, maxHeaderBytes: Int = 8 * 1024 * 1024): HfPrediction {
+     *  octets du fichier, jamais le poids complet.
+     *
+     *  BUG REEL trouve et corrige (2026-09-06, "j'ai des erreur permission
+     *  denied quand je selectionne un model") : cette fonction lisait le
+     *  fichier en Java pur (FileInputStream), sans le fallback su deja
+     *  utilise partout ailleurs (FileBrowser.kt, ProcessMemoryMonitor.kt) —
+     *  pour un GGUF dans un dossier root-only (ex /data/local/tmp lui-meme,
+     *  cf. le meme probleme de permission deja rencontre sur le listing),
+     *  la lecture directe echoue. Fix : meme pattern try-direct-puis-su,
+     *  via `dd` pour extraire juste les premiers octets sans tout lire. */
+    fun predictLocalFile(path: String, maxHeaderBytes: Int = 32 * 1024 * 1024): HfPrediction {
         val f = java.io.File(path)
-        if (!f.exists()) throw java.io.FileNotFoundException(path)
-        val toRead = minOf(f.length(), maxHeaderBytes.toLong()).toInt()
-        val header = java.io.FileInputStream(f).use { it.readBytes(toRead) }
-        return predictFromHeader(path, f.name, header)
+        val direct = try {
+            if (f.exists() && f.canRead()) {
+                val toRead = minOf(f.length(), maxHeaderBytes.toLong()).toInt()
+                java.io.FileInputStream(f).use { it.readBytes(toRead) }
+            } else null
+        } catch (_: Exception) { null }
+
+        val header = if (direct != null && direct.isNotEmpty()) direct
+            else readHeaderViaSu(path, maxHeaderBytes)
+                ?: throw java.io.IOException("lecture impossible (direct ET su ont echoue) pour $path — " +
+                        "root accorde a l'app dans Magisk ? fichier existe ?")
+        return try {
+            predictFromHeader(path, f.name, header)
+        } catch (e: java.nio.BufferUnderflowException) {
+            // En-tete GGUF plus gros que maxHeaderBytes (modele avec BEAUCOUP
+            // de tenseurs/metadonnees, ex un gros MoE type Gemma-26B-A4B) —
+            // erreur claire au lieu de laisser fuiter l'exception brute.
+            throw java.io.IOException("en-tete GGUF incomplet dans les " +
+                    "${maxHeaderBytes / 1024 / 1024} Mo lus (modele avec beaucoup de " +
+                    "tenseurs/metadonnees) — augmenter maxHeaderBytes")
+        }
+    }
+
+    /** Extrait les premiers octets d'un fichier via `su -c dd` — contourne
+     *  les permissions POSIX qui bloquent une lecture Java directe (meme
+     *  cause que le bug de listing de FileBrowser.kt : /data/local/tmp et
+     *  dossiers similaires sont root-only pour une app tierce). Lit les
+     *  octets bruts du stdout du process (PAS via un Reader texte, qui
+     *  corromprait les octets binaires du GGUF). */
+    private fun readHeaderViaSu(path: String, maxHeaderBytes: Int): ByteArray? {
+        return try {
+            val mb = (maxHeaderBytes / (1024 * 1024)).coerceAtLeast(1)
+            val escaped = path.replace("'", "'\\''")
+            val p = ProcessBuilder("su", "-c", "dd if='$escaped' bs=1M count=$mb 2>/dev/null")
+                .start()
+            val bytes = p.inputStream.readBytes(maxHeaderBytes)
+            p.waitFor()
+            if (bytes.isEmpty()) null else bytes
+        } catch (_: Exception) {
+            null
+        }
     }
 
     private fun java.io.InputStream.readBytes(n: Int): ByteArray {
