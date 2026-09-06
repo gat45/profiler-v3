@@ -7,6 +7,13 @@ import java.io.InputStreamReader
 // HwMonitor — collecte temps réel CPU/GPU/NPU/RAM/batt/thermique via root.
 // Le script hwmon.sh est poussé dans /data/local/tmp (une passe ~0.6s).
 // Sortie : lignes "clé=valeur" parsées en Map. Best-effort : jamais d'exception.
+//
+// REVISE (2026-09-06) suite a "on ne voit pas tous les coeurs, les % et
+// temperature de tous" : hwmon.sh boucle maintenant sur TOUS les coeurs
+// (cpuN_freq/cpuN_pct pour chaque N present) et TOUTES les zones thermiques
+// (temp_<nom_zone>), plus generique qu'avant (3 coeurs + 4 zones fixes).
+// `raw` expose la map complete pour un affichage dynamique cote UI, les
+// champs nommes existants restent pour compatibilite ascendante.
 // ===========================================================================
 
 data class HwSample(
@@ -25,6 +32,7 @@ data class HwSample(
     val battPct: Int? = null,
     val battW: Int? = null,
     val fastrpcRate: Int? = null,   // signaux fastrpc/s (activité NPU directe)
+    val raw: Map<String, String> = emptyMap(), // TOUTES les cles brutes (cpuN_*, temp_*)
     val ts: Long = System.currentTimeMillis(),
 ) {
     // Proxy d'activité NPU : priorité au comptage fastrpc réel si >0,
@@ -35,6 +43,22 @@ data class HwSample(
             npuTemp != null -> ((npuTemp!! - 45).coerceIn(0, 45) * 100 / 45)
             else -> null
         }
+
+    /** Liste (coeur, freqMHz, pct) pour TOUS les coeurs presents dans `raw`,
+     *  tries par numero de coeur. */
+    fun allCores(): List<Triple<Int, Long?, Int?>> {
+        val re = Regex("""^cpu(\d+)_freq$""")
+        return raw.keys.mapNotNull { k -> re.find(k)?.groupValues?.get(1)?.toIntOrNull() }
+            .sorted()
+            .map { n -> Triple(n, raw["cpu${n}_freq"]?.toLongOrNull(), raw["cpu${n}_pct"]?.toIntOrNull()) }
+    }
+
+    /** Liste (nom_zone, temperature_C) pour TOUTES les zones thermiques. */
+    fun allTemps(): List<Pair<String, Int>> {
+        return raw.entries.filter { it.key.startsWith("temp_") }
+            .mapNotNull { (k, v) -> v.toIntOrNull()?.let { k.removePrefix("temp_") to it } }
+            .sortedBy { it.first }
+    }
 }
 
 object HwMonitor {
@@ -89,6 +113,17 @@ object HwMonitor {
         }
         fun int(k: String): Int? = m[k]?.toIntOrNull()
         fun long(k: String): Long? = m[k]?.toLongOrNull()
+        // Alias retro-compatibles : hwmon.sh emet maintenant temp_<zone>
+        // generique (pas npu_temp/gpu_temp/cpu_temp fixes) — on retrouve la
+        // bonne zone par sous-chaine du nom, meme mapping qu'avant.
+        fun tempBySubstring(vararg needles: String): Int? {
+            for ((k, v) in m) {
+                if (!k.startsWith("temp_")) continue
+                val zone = k.removePrefix("temp_")
+                if (needles.any { zone.contains(it, ignoreCase = true) }) return v.toIntOrNull()
+            }
+            return null
+        }
         return HwSample(
             cpuPct = int("cpu_pct"),
             cpu0Freq = long("cpu0_freq"),
@@ -96,15 +131,16 @@ object HwMonitor {
             cpu8Freq = long("cpu8_freq"),
             gpuFreq = long("gpu_freq"),
             gpuPct = int("gpu_pct"),
-            npuTemp = int("npu_temp"),
-            npuTemp2 = int("npu_temp2"),
-            gpuTemp = int("gpu_temp"),
-            cpuTemp = int("cpu_temp"),
+            npuTemp = tempBySubstring("nsphvx"),
+            npuTemp2 = tempBySubstring("qmx"),
+            gpuTemp = tempBySubstring("gpuss"),
+            cpuTemp = tempBySubstring("cpullc"),
             ramPct = int("ram_pct"),
             ramAvailMb = long("ram_avail_mb"),
             battPct = int("batt_pct"),
             battW = int("batt_w"),
             fastrpcRate = fastrpcRate,
+            raw = m,
         )
     }
 

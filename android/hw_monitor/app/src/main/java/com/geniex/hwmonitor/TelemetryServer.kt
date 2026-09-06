@@ -122,6 +122,7 @@ object TelemetryServer {
             path == "/hf_search" && method == "GET" -> hfSearch(params)
             path == "/hf_files" && method == "GET" -> hfFiles(params)
             path == "/bench" && method == "GET" -> runBench()
+            path == "/ls" && method == "GET" -> lsPath(params)
             else -> 404 to """{"error":"not found","path":"$path"}"""
         }
     }
@@ -302,6 +303,16 @@ object TelemetryServer {
         } catch (e: Exception) {
             500 to """{"error":"${(e.message ?: e.javaClass.simpleName).replace("\"", "'")}"}"""
         }
+    }
+
+    private fun lsPath(params: Map<String, String>): Pair<Int, String> {
+        val path = params["path"] ?: "/"
+        val (entries, source) = FileBrowser.list(path)
+        val arr = entries.joinToString(",") {
+            """{"name":"${it.name.replace("\"", "'")}","isDir":${it.isDir},"sizeBytes":${it.sizeBytes}}"""
+        }
+        val rawDebug = FileBrowser.lastSuRawOutput?.take(500)?.replace("\"", "'")?.replace("\n", "\\n")
+        return 200 to """{"path":"$path","source":"$source","entries":[$arr],"_suRawDebug":${if (rawDebug != null) "\"$rawDebug\"" else "null"}}"""
     }
 
     private fun renderPrediction(p: HfPrediction): Pair<Int, String> {

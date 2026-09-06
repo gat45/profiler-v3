@@ -1,7 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
+    android:fitsSystemWindows="true">
+
+<LinearLayout
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
     android:orientation="vertical"
     android:padding="16dp">
 
@@ -21,18 +26,19 @@
         android:textSize="13sp" />
 
     <TextView
-        android:id="@+id/tvCpu"
+        android:id="@+id/tvCores"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_marginTop="20dp"
         android:fontFamily="monospace"
-        android:text="CPU  : --"
-        android:textSize="18sp" />
+        android:text="CPU (tous coeurs) : --"
+        android:textSize="15sp" />
 
     <TextView
         android:id="@+id/tvGpu"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
         android:fontFamily="monospace"
         android:text="GPU  : --"
         android:textSize="18sp" />
@@ -51,13 +57,14 @@
         android:layout_height="wrap_content"
         android:layout_marginTop="20dp"
         android:fontFamily="monospace"
-        android:text="TEMP : --"
-        android:textSize="16sp" />
+        android:text="TEMP (toutes zones) : --"
+        android:textSize="14sp" />
 
     <TextView
         android:id="@+id/tvRam"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
         android:fontFamily="monospace"
         android:text="RAM  : --"
         android:textSize="16sp" />
@@ -93,4 +100,12 @@
         android:layout_marginTop="8dp"
         android:text="Demarrer/Arreter le serveur telemetrie" />
 
+    <Button
+        android:id="@+id/btnBrowseFiles"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:text="Choisir un modele (naviguer / root)" />
+
 </LinearLayout>
+</ScrollView>

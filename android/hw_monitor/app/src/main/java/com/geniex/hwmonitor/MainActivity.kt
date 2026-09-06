@@ -14,7 +14,7 @@ import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var tvCpu: TextView
+    private lateinit var tvCores: TextView
     private lateinit var tvGpu: TextView
     private lateinit var tvNpu: TextView
     private lateinit var tvTemp: TextView
@@ -29,7 +29,7 @@ class MainActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
-        tvCpu = findViewById(R.id.tvCpu)
+        tvCores = findViewById(R.id.tvCores)
         tvGpu = findViewById(R.id.tvGpu)
         tvNpu = findViewById(R.id.tvNpu)
         tvTemp = findViewById(R.id.tvTemp)
@@ -48,6 +48,9 @@ class MainActivity : AppCompatActivity() {
         btnToggleServer.setOnClickListener {
             if (TelemetryServer.isRunning()) TelemetryServer.stop() else TelemetryServer.start()
             renderServerStatus()
+        }
+        findViewById<Button>(R.id.btnBrowseFiles).setOnClickListener {
+            startActivity(android.content.Intent(this, FileBrowserActivity::class.java))
         }
         renderServerStatus()
     }
@@ -76,31 +79,47 @@ class MainActivity : AppCompatActivity() {
         running = true
         job = lifecycleScope.launch {
             while (isActive) {
-                val s = withContext(Dispatchers.IO) { HwMonitor.collect() }
-                render(s)
+                // scriptAvailable() fait un appel su bloquant — BUG REEL
+                // trouve et corrige (demande "ca reffeche pas") : l'ancienne
+                // version l'appelait depuis render() APRES le retour du
+                // withContext(IO), donc SUR LE THREAD PRINCIPAL, a chaque
+                // tick (1 Hz) — un appel su bloquant sur le thread UI cause
+                // des a-coups/gel visibles. Deplace ici, dans le meme bloc IO.
+                val (s, scriptOk) = withContext(Dispatchers.IO) {
+                    HwMonitor.collect() to HwMonitor.scriptAvailable()
+                }
+                render(s, scriptOk)
                 delay(1000)
             }
         }
     }
 
-    private fun render(s: HwSample) {
-        val cpu = s.cpuPct ?: -1
+    private fun render(s: HwSample, scriptOk: Boolean) {
         val gpu = s.gpuPct ?: -1
         val npu = s.npuPct ?: -1
-        tvCpu.text = "CPU  : ${if (cpu >= 0) "$cpu%" else "n/a"}  " +
-                "${fmtMHz(s.cpu4Freq)} / ${fmtMHz(s.cpu8Freq)}"
+
+        // TOUS les coeurs (demande explicite "on ne voit pas tous les coeurs,
+        // les % et temperature de tous") — une ligne par coeur present,
+        // plus l'agregat global en tete.
+        val cores = s.allCores()
+        val coreLines = StringBuilder("CPU global : ${s.cpuPct?.let { "$it%" } ?: "n/a"}\n")
+        for ((n, freq, pct) in cores) {
+            coreLines.append("  core$n : ${pct?.let { "$it%" } ?: "n/a"}  ${fmtMHz(freq)}\n")
+        }
+        if (cores.isEmpty()) coreLines.append("  (aucun coeur lu — script hwmon.sh a jour ? root accorde ?)")
+        tvCores.text = coreLines.toString().trimEnd()
+
         tvGpu.text = "GPU  : ${if (gpu >= 0) "$gpu%" else "n/a"}  " + fmtMHz(s.gpuFreq)
         tvNpu.text = "NPU  : ${if (npu >= 0) "$npu%" else "n/a"}  " +
                 "${s.npuTemp?.let { "${it}°C" } ?: ""}"
-        val temps = listOfNotNull(
-            s.cpuTemp?.let { "CPU ${it}°" },
-            s.gpuTemp?.let { "GPU ${it}°" },
-            s.npuTemp?.let { "NPU ${it}°" },
-        )
-        tvTemp.text = "TEMP : " + (temps.joinToString("  ") ?: "n/a")
+
+        // TOUTES les zones thermiques (pas juste 3 fixes)
+        val temps = s.allTemps()
+        tvTemp.text = if (temps.isEmpty()) "TEMP : n/a"
+            else "TEMP (${temps.size} zones) :\n" + temps.joinToString("\n") { (name, t) -> "  $name : ${t}°C" }
+
         tvRam.text = "RAM  : ${s.ramPct ?: 0}%  (${s.ramAvailMb ?: 0} MB libres)"
         tvBatt.text = "BATT : ${s.battPct ?: 0}%  ${s.battW ?: 0} W"
-        val scriptOk = HwMonitor.scriptAvailable()
         tvStatus.text = if (scriptOk) "● temps réel (1 Hz)" else "⚠ script absent: ${HwMonitor.SCRIPT}"
     }
 
