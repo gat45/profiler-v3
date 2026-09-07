@@ -236,13 +236,32 @@ object TelemetryServer {
             ?.groupValues?.get(1)?.replace("\\\"", "\"")
             ?: return 400 to """{"error":"body must be {\"cmd\":\"...\"}"}"""
         return try {
-            // Process.pid() (java.lang) indisponible dans ce SDK Android tel
-            // que configure ici (unresolved a la compilation) -> on recupere
-            // le pid en le faisant s'auto-imprimer via $$ (pid du shell),
-            // puis `exec` remplace le shell par la commande reelle SANS
-            // changer de pid (exec ne fork pas) -> le pid imprime EST celui
-            // du process final, pas juste celui du sh intermediaire.
-            val p = ProcessBuilder("sh", "-c", "echo \$\$; exec $cmd")
+            // BUG REEL trouve et corrige (2026-09-07, "verifie ca fonctionne
+            // maintenant") : `exec` ne peut remplacer le process QUE par un
+            // executable reel — ici `cmd` commence quasi-toujours par
+            // "cd <dir> && ...", et `cd` est un BUILTIN shell, pas un
+            // executable sur le PATH. `exec cd ...` echoue silencieusement
+            // et TERMINE le shell immediatement, avant meme que le `&&`
+            // suivant ne s'execute -> tout /run et /infer avec un `cd` en
+            // tete du cmd echouait silencieusement (confirme : les CSV de
+            // trace "generes" par /infer etaient en realite des fichiers
+            // datant de tests manuels de la veille, jamais regeneres).
+            // Fix #1 : ne plus utiliser `exec` du tout — le pid du shell
+            // wrapper lui-meme (capture via $$) reste valide pour le
+            // suivi "alive" tant que la commande tourne (le shell attend
+            // la fin de la chaine && avant de se terminer).
+            //
+            // BUG REEL #2 trouve et corrige (meme session) : meme corrige,
+            // `sh -c` lance toujours depuis le DOMAINE SELinux de l'app
+            // (untrusted_app) — verifie via `run-as ... ./llama` :
+            // "inaccessible or not found", alors que le meme binaire
+            // s'execute sans probleme en `adb shell` (domaine shell) ou
+            // `su -c` (root). Android bloque l'EXECUTION de binaires places
+            // dans /data/local/tmp pour une app tierce (vecteur malware
+            // classique), meme avec le fichier lisible. Fix : passer par
+            // `su -c` (root deja accorde a l'app dans Magisk) au lieu de
+            // `sh -c` brut.
+            val p = ProcessBuilder("su", "-c", "echo \$\$; $cmd")
                 .redirectErrorStream(true).start()
             val firstLine = BufferedReader(InputStreamReader(p.inputStream)).readLine()
             val pid = firstLine?.trim()?.toIntOrNull()
@@ -347,7 +366,11 @@ object TelemetryServer {
                 (if (backend == "htp") "-lv 5 > prof.log 2>&1" else "> run_out.log 2>&1")
 
         return try {
-            val p = ProcessBuilder("sh", "-c", "echo \$\$; exec $cmd").redirectErrorStream(true).start()
+            // Memes 2 bugs/fix que runCommand() ci-dessus : pas de `exec`,
+            // et `su -c` (pas `sh -c`) pour contourner le blocage SELinux
+            // d'execution de binaires depuis /data/local/tmp pour une app
+            // tierce (verifie via `run-as ... ./llama` : "inaccessible").
+            val p = ProcessBuilder("su", "-c", "echo \$\$; $cmd").redirectErrorStream(true).start()
             val firstLine = BufferedReader(InputStreamReader(p.inputStream)).readLine()
             val pid = firstLine?.trim()?.toIntOrNull()
                 ?: return 500 to """{"error":"impossible de recuperer le pid"}"""
