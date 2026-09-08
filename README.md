@@ -78,7 +78,7 @@ android/hw_monitor/                  # app Android compagnon (Kotlin, Gradle)
 | `profiler.py` | Corrections + ajouts du 2026-09-06 (compat quant↔backend, marge anti-OOM, bornes lower/upper, régime device réel, plan de quant par couche avec budget, warnings collapse qualité) | **Point d'entrée principal** (CLI) |
 | `predictor.py` | Régime device réel (thermique/doze/mémoire/charge/idle-throttle), baselines par modèle avec distinction mesuré/théorique, log d'outcomes pour calibration future | Gouverneur, complémentaire à `profiler.py` |
 | `capability_db.py` | Registre des formats de quant supportés par HTP (avec ref exacte fichier:ligne), codes de statut HTP, incidents de crash catalogués (avec `blast_radius`), calculateur de tradeoff RAM/qualité/débit avec verdict automatique | Base de connaissance, alimentée par incidents réels |
-| `parse_hexagon_profile.py` | Parse la trace réelle DSP par op/par couche (HVX/HMX/DMA), reconstruction des compteurs de cycles 64-bit tronqués | Nouveau, validé sur device réel (56% de mapping trace-evt→couche) |
+| `parse_hexagon_profile.py` | Parse la trace réelle DSP par op/par couche (HVX/HMX/DMA), reconstruction des compteurs de cycles 64-bit tronqués, agrégation VTCM par couche | Nouveau, validé sur device réel (**99.99% de mapping trace-evt→couche**, cf. §5 ; VTCM par couche vérifié réel sur device, aucun spill détecté) |
 | `predict_from_hf.py` | Pipeline complet "prédire sans télécharger" : en-tête distant → analyse RAM/L3 → correction routing MoE / dense → risque de crash → plan de quant par couche | Nouveau, testé de bout en bout |
 | `adaptive_lever.py` | Recommandation de leviers runtime (`GGML_HEXAGON_OPPOLL`, etc.) selon la classe de goulot détectée | Corrections mineures |
 | `live_monitor.py` | Monitoring VRAIMENT temps réel — parse les ops pendant que le modèle tourne encore sur le device (pas après coup) | Nouveau, testé device réel |
@@ -186,8 +186,38 @@ le compteur réel est 64-bit. Un premier essai de correspondance naïve
 mais pas comparables sans dé-troncature. `CycleUnwrapper` (identique à
 l'implémentation officielle upstream `llama.cpp/scripts/snapdragon/
 ggml-hexagon-profile.py`) reseed à chaque OPBATCH et permet un mapping
-trace→couche réel, validé à **56% de succès** (264182/471892 events) sur une
-trace réelle Qwen3-0.9B.
+trace→couche réel, validé initialement à 56.0% de succès (264182/471892
+events) sur une trace réelle Qwen3-0.9B.
+
+**AMÉLIORÉ 2026-09-08** : la fenêtre de matching de chaque op passe de
+`[start, end]` à `[start, début_op_suivant)` — élimine par construction le
+trou inter-op (dispatch/sync/DMA) où les événements `trace-evt` tombaient et
+étaient silencieusement perdus, sans aucun compteur de diagnostic. Résultat
+sur la même trace de référence : **99.99% (471837/471892)**, le reliquat
+(2 événements avant le tout premier op, 53 après le tout dernier) étant
+désormais explicitement compté au lieu d'être perdu sans trace
+(`n_trace_before_first_op` / `n_trace_after_last_op` dans les métadonnées de
+`parse_log()`).
+
+### VTCM par couche (nouveau, 2026-09-08)
+
+`build_per_layer_vtcm()` / `render_per_layer_vtcm_report()` corrèlent le
+mapping par couche (ci-dessus) avec le budget/usage VTCM réel, déjà loggé
+par op (`htp-opnode.h::format_kernel_params`, champ `<path> vtcm <bytes>`)
+mais jamais agrégé par couche avant. Capture le budget device réel (ligne
+`hwinfo ... vtcm N MB`) et détecte les messages de spill/fallback
+(`HEX_VERBOSE` : `skip ... VTCM needed > budget`, `falling back to HVX
+flat`) — **ces messages nécessitent `GGML_HEXAGON_VERBOSE=1` en plus de
+`GGML_HEXAGON_PROFILE`**, une variable distincte, facile à oublier.
+
+Vérifié sur device réel (OnePlus 15, Qwen3-0.6B, `GGML_HEXAGON_PROFILE=2`
++ `GGML_HEXAGON_VERBOSE=1` ensemble, run de 16 tokens) : **aucun spill/
+fallback VTCM réel**, toutes les couches tournent près du plafond (~8 Mo,
+budget mesuré via `hwinfo`) sans jamais le dépasser. Une première tentative
+sans `GGML_HEXAGON_VERBOSE=1` avait donné la même conclusion mais n'était
+**pas fiable** (le signal de spill ne peut structurellement pas apparaître
+sans ce flag) — refait avec le flag actif pour confirmer que c'est un vrai
+résultat, pas une absence de mesure.
 
 ## Risque de crash — `capability_db.py`
 

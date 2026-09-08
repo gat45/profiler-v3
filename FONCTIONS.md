@@ -310,10 +310,28 @@ Parsing bas niveau :
 - **`parse_log(path)`** — parseur principal : maintient un `CycleUnwrapper`
   par device et par thread, unwrap chaque op ET chaque event `trace-evt`
   (HVX/HMX/DMA/L2FLUSH), puis fait correspondre chaque event à la couche
-  dont la fenêtre `[start,end]` de cycles le contient. Retourne
-  `(events, batches, stats)` avec `stats["per_layer_engine"]` (compteurs
-  HVX/HMX/DMA par couche) — **56% de correspondance réussie** sur une trace
-  réelle Qwen3-0.9B (264182/471892 events mappés).
+  dont la fenêtre de cycles le contient. Retourne `(events, batches, stats)`
+  avec `stats["per_layer_engine"]` (compteurs HVX/HMX/DMA par couche).
+  **AMÉLIORÉ 2026-09-08** : la fenêtre de chaque op est étendue de
+  `[start,end]` à `[start, début_op_suivant)`, éliminant le trou inter-op
+  (dispatch/sync/DMA) où les événements tombaient et étaient silencieusement
+  perdus → mapping passé de **56.0%** à **99.99%** (471837/471892) sur la
+  même trace réelle Qwen3-0.9B ; le reliquat (2 avant le premier op, 53
+  après le dernier) est désormais explicitement compté
+  (`stats["n_trace_before_first_op"]` / `["n_trace_after_last_op"]`) au lieu
+  d'être perdu sans trace. Capture aussi `stats["vtcm_budget_bytes"]`
+  (ligne `hwinfo ... vtcm N MB`) et `stats["vtcm_spills"]` (messages
+  `HEX_VERBOSE` de spill/fallback — nécessitent `GGML_HEXAGON_VERBOSE=1`,
+  une variable distincte de `GGML_HEXAGON_PROFILE`, sans quoi ce signal ne
+  peut structurellement pas apparaître).
+- **`build_per_layer_vtcm(events)`** / **`render_per_layer_vtcm_report(...)`**
+  (nouveau 2026-09-08) — corrèlent le mapping par couche ci-dessus avec le
+  budget/usage VTCM réel déjà loggé par op (`path`+`vtcm_bytes`, déjà parsés
+  par `parse_op_line` mais jamais agrégés par couche avant) : vtcm moyen/max,
+  %budget, latence totale, chemin kernel dominant par couche. Vérifié sur
+  device réel (OnePlus 15, `GGML_HEXAGON_PROFILE=2` + `GGML_HEXAGON_VERBOSE=1`
+  ensemble) : aucun spill/fallback réel, couches proches du plafond (~8 Mo)
+  sans le dépasser.
 
 Analyse par couche (le "fingerprint" temps réel demandé) :
 - **`build_layer_fingerprint(events, layer)`** — agrège TOUS les événements
@@ -330,9 +348,12 @@ Analyse par couche (le "fingerprint" temps réel demandé) :
 Rapports agrégés :
 - **`render_trace_evt_report(counts)`** — agrégat global HVX/HMX/DMA sur
   toute la trace (toutes couches confondues).
-- **`render_per_layer_engine_report(per_layer_engine, n_total_trace_evt)`**
-  — même chose mais PAR couche (remplace une première tentative abandonnée
-  faute de mapping cycles fiable, résolue par `CycleUnwrapper`).
+- **`render_per_layer_engine_report(per_layer_engine, n_total_trace_evt,
+  n_before_first=0, n_after_last=0)`** — même chose mais PAR couche
+  (remplace une première tentative abandonnée faute de mapping cycles
+  fiable, résolue par `CycleUnwrapper`). Affiche depuis 2026-09-08 le
+  compte explicite des événements structurellement hors mapping (avant le
+  premier op / après le dernier).
 - **`render_batch_overhead_report(batches)`** — **c'est ici qu'est mesuré le
   "coût d'arête"** : pas entre deux couches précises, mais le coût de
   dispatch par batch entier (~1 batch ≈ 1 couche). A produit la découverte
@@ -544,9 +565,17 @@ générique l'est.
 
 ## Ce qui reste hors de portée (limites honnêtes)
 
-- Le mapping trace-evt→couche (mode post-hoc `=3`) est à 56%, pas 100% — les
-  fiches par couche sont fiables sur ce qu'elles rapportent, mais ne
-  couvrent pas la totalité des événements bas niveau.
+- Le mapping trace-evt→couche (mode post-hoc `=3`) est à **99.99%** depuis
+  le 2026-09-08 (était 56% avant l'extension de fenêtre inter-op) — le
+  reliquat (2 avant le premier op, 53 après le dernier sur la trace de
+  référence) est structurel et désormais explicitement compté.
+- La détection de spill/fallback VTCM nécessite `GGML_HEXAGON_VERBOSE=1`
+  EN PLUS de `GGML_HEXAGON_PROFILE` — sans ce flag distinct, l'absence de
+  signal ne prouve rien. Vérifié avec les deux flags actifs sur device réel
+  (2026-09-08) : aucun spill sur le run testé (Qwen3-0.6B, 16 tokens),
+  couches proches du plafond VTCM (~8 Mo) sans le dépasser — mais un seul
+  run/modèle testé, pas encore généralisé à un modèle plus gros (MoE)
+  où un vrai spill est plus probable.
 - Le live monitor (`live_monitor.py`) affiche un tableau texte simple, pas un
   dashboard graphique — suffisant pour comprendre ce qui se passe en direct,
   mais pas pensé pour un affichage long-terme/historique multi-runs.
