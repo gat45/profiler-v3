@@ -33,6 +33,14 @@ import sys
 import urllib.error
 import urllib.request
 
+# Bug corrige (audit 2026-09-08) : console Windows par defaut en cp1252,
+# incapable d'afficher certains caracteres Unicode des rapports.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 sys.path.insert(0, __file__.rsplit("/", 1)[0] if "/" in __file__ else ".")
 import profile_model as pm
 import capability_db as cdb

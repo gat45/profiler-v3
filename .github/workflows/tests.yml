@@ -1,0 +1,19 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Pas de device reel en CI : les tests qui en dependent (traces
+      # brutes >2 Mo, non versionnees, voir device_logs/.gitignore) se
+      # SKIP proprement au lieu d'echouer -- voir tests/test_parse_hexagon_profile.py.
+      - name: Run unit tests
+        run: python -m unittest discover tests -v

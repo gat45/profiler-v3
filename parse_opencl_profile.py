@@ -48,6 +48,14 @@ import re
 import sys
 from collections import defaultdict
 
+# Bug corrige (audit 2026-09-08) : console Windows par defaut en cp1252,
+# incapable d'afficher certains caracteres Unicode des rapports.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 OP_LAYER_RE = re.compile(r"^(.*)-(\d+)$")
 
 

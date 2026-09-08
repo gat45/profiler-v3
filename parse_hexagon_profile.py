@@ -43,7 +43,17 @@ Format de ligne source (confirme empiriquement le 2026-09-06, Qwen3-0.9B-A0.6B,
 import argparse
 import json
 import re
+import sys
 from collections import Counter
+
+# Bug corrige (audit 2026-09-08) : console Windows par defaut en cp1252,
+# qui ne connait pas certains caracteres Unicode emis dans les rapports
+# (accents, guillemets, "->"). reconfigure() est un no-op sur UTF-8 deja.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 LINE_RE = re.compile(r"profile-op\s+(.*)$")
 USEC_RE = re.compile(r"\busec\s+(\d+)")

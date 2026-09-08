@@ -1,5 +1,18 @@
 # profiler_v3 — profilage NPU/LLM OnePlus 15 (SM8850, Hexagon HTP v81)
 
+> **Portée** : calibrations et constantes validées **uniquement sur SM8850 /
+> Hexagon HTP v81** (OnePlus 15). Extrapolation à un autre SoC (v75, v79...)
+> **non garantie**, non testée. Le mapping trace-evt→couche (99.99%-100%,
+> voir plus bas) est vérifié sur 2 modèles/traces indépendantes ; le
+> prédicteur HuggingFace (`predict_from_hf.py`), lui, repose sur une
+> calibration de **2 points (dense) et 4 points (MoE)** seulement
+> (`predictor_v1_outcomes.jsonl`) — traiter ses estimations comme des ordres
+> de grandeur, pas des garanties. Pas de licence déclarée à ce jour : tous
+> droits réservés par défaut, ne pas supposer un droit de fork/réutilisation
+> sans contacter l'auteur. Voir `REPRODUCIBILITY.md` pour reproduire les
+> mesures et `CONTRIBUTING.md` pour contribuer (retours sur d'autres SoC
+> bienvenus, même s'ils contredisent les calibrations actuelles).
+
 Version consolidée du profiler (créée 2026-09-06, mise à jour en continu le
 même jour). Remplace la dispersion `snapdragon_profiling/` (~150 scripts,
 beaucoup morts ou redondants) + les copies `bench_results/corrections/*_corrige.py`
@@ -13,6 +26,12 @@ supprimé ni modifié.
 profiler_v3/
 ├── README.md                      # ce fichier — vue d'ensemble, découvertes, usage
 ├── FONCTIONS.md                   # detail de CHAQUE fonction, organise par usage
+├── REPRODUCIBILITY.md             # commandes exactes, versions, portee des mesures (2026-09-08)
+├── PATCHES.md                     # quel parseur necessite un rebuild/patch, et lequel n'en a pas
+├── CONTRIBUTING.md                # comment soumettre une trace ou un correctif
+├── tests/                         # tests unitaires (unittest, tourne en CI, 2026-09-08)
+│   ├── test_parse_hexagon_profile.py    # verrouille la regression mapping 56%->99.99%
+│   └── test_parse_backend_copy_profile.py  # verrouille le mode degrade (PATCHES.md)
 │                                   # (profiler / predire HF / mesurer temps reel)
 ├── profile_model.py                # ORIGINAL (snapdragon_profiling/) — ne pas modifier
 ├── profiler.py                     # point d'entree principal (CLI)
@@ -198,6 +217,21 @@ sur la même trace de référence : **99.99% (471837/471892)**, le reliquat
 désormais explicitement compté au lieu d'être perdu sans trace
 (`n_trace_before_first_op` / `n_trace_after_last_op` dans les métadonnées de
 `parse_log()`).
+
+**GÉNÉRALISATION VÉRIFIÉE 2026-09-08** — critique reçue et fondée : un fix
+validé sur une seule trace peut être du sur-ajustement (cf. les 3 points
+`predictor_v1_outcomes.jsonl` à erreur 0.0% qui étaient en réalité des
+prédictions calées sur l'unique observation n=1, pas une vraie validation —
+voir `predictor_v1_outcomes.jsonl`). Pour ne pas reproduire ce biais sur le
+fix de mapping, capture indépendante refaite sur un **second modèle,
+différent** (Qwen3-1.7B au lieu de Qwen3-0.9B, `GGML_HEXAGON_PROFILE=3` sur
+device réel OnePlus 15, 24 tokens, capture 220 Mo, 1 332 495 événements
+trace-evt — presque 3× le volume de la trace de référence) :
+**1 332 479/1 332 495 mappés = 100.0%** (2 avant le premier op, 14 après le
+dernier — même profil structurel que sur la trace de référence). Le fix de
+mapping généralise ; la calibration du prédicteur HF (§ suivante), elle,
+reste fragile (2-4 points) et n'a PAS le même niveau de vérification —
+distinction importante à ne pas confondre.
 
 ### VTCM par couche (nouveau, 2026-09-08)
 

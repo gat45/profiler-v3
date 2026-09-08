@@ -31,15 +31,41 @@ Usage :
 import argparse
 import csv
 import re
+import sys
 from collections import defaultdict
 
+# Bug corrige (audit 2026-09-08) : la console Windows par defaut encode en
+# cp1252, qui ne connait pas "->" U+2192 utilise dans render_report()
+# -> crash UnicodeEncodeError en sortie normale, sur TOUTE utilisation de ce
+# script sous cmd/PowerShell par defaut. reconfigure() est un no-op inoffensif
+# sur les plateformes deja en UTF-8 (Linux/macOS).
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 LAYER_RE = re.compile(r"-(\d+)$")
+
+
+EXPECTED_COLUMNS = {"tensor", "src_backend", "dst_backend", "bytes", "duration_ms"}
+
+# AJOUT 2026-09-08 (reponse a une critique) : mode degrade explicite. Avant
+# ce fix, un CSV absent (patch ggml-backend.cpp non applique, cf PATCHES.md)
+# et un run non-mixte legitime (-ngl 99, aucune copie a voir) produisaient
+# EXACTEMENT le meme rapport ("aucun evenement") -- ambigu, ne dit pas si
+# c'est attendu ou si le runtime n'est juste pas instrumente.
+class NotInstrumented(Exception):
+    """Le CSV n'a pas les colonnes attendues -- runtime non patche (voir PATCHES.md)."""
 
 
 def parse_csv(path):
     rows = []
     with open(path, encoding="utf-8", errors="replace") as f:
         reader = csv.DictReader(f)
+        if reader.fieldnames is None or not EXPECTED_COLUMNS.issubset(set(reader.fieldnames)):
+            raise NotInstrumented(
+                f"colonnes trouvees {reader.fieldnames!r}, attendues {sorted(EXPECTED_COLUMNS)}")
         for line in reader:
             try:
                 bytes_ = int(line["bytes"])
@@ -57,9 +83,9 @@ def parse_csv(path):
 def render_report(rows):
     if not rows:
         return ("Aucun evenement de copie inter-backend dans cette trace — "
-                "soit un seul backend etait actif (run non-mixte, ex -ngl 99 "
-                "ou -ngl 0 : c'est attendu, pas une erreur), soit "
-                "GGML_BACKEND_COPY_PROFILE n'etait pas active.")
+                "run non-mixte (un seul backend actif, ex -ngl 99 ou -ngl 0) : "
+                "c'est attendu, pas une erreur, GGML_BACKEND_COPY_PROFILE "
+                "etait bien actif mais n'avait rien a rapporter.")
 
     pairs = defaultdict(lambda: {"n": 0, "bytes": 0, "ms": 0.0})
     for r in rows:
@@ -108,8 +134,17 @@ def main():
     ap.add_argument("csv_path")
     ap.add_argument("--out")
     args = ap.parse_args()
-    rows = parse_csv(args.csv_path)
-    report = render_report(rows)
+    try:
+        rows = parse_csv(args.csv_path)
+    except FileNotFoundError:
+        report = (f"runtime non instrumenté — fichier '{args.csv_path}' introuvable. "
+                  "GGML_BACKEND_COPY_PROFILE=1 necessite le patch manuel de "
+                  "ggml-backend.cpp (voir PATCHES.md), pas juste une variable d'env.")
+    except NotInstrumented as e:
+        report = (f"runtime non instrumenté — données de copie inter-backend "
+                  f"indisponibles ({e}). Voir PATCHES.md.")
+    else:
+        report = render_report(rows)
     if args.out:
         with open(args.out, "w", encoding="utf-8") as f:
             f.write(report)

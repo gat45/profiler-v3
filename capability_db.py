@@ -480,6 +480,75 @@ def format_capability_report(hits, query_desc=""):
     return "\n".join(lines)
 
 
+# ===========================================================================
+# Sanity checks anti-corruption silencieuse (2026-09-08)
+#
+# Reponse directe a une critique recue : le bug gallocr (#28448, corrige le
+# 2026-09-07) prouve que le risque de CORRUPTION SANS CRASH est reel sur ce
+# backend (deux tenseurs differents partageant un plan memoire perime,
+# aucune assertion, aucun signal). Le catalogue d'incidents ci-dessus liste
+# des crashes -- utile mais aveugle a ce cas precis. Ces deux fonctions
+# transforment le catalogue d'une liste passive en detecteur actif : elles
+# ne PREVIENNENT rien (aucune n'a acces au runtime), elles signalent une
+# DERIVE ANORMALE entre deux executions cote appelant.
+
+def sanity_check_output(reference_text: str, candidate_text: str,
+                        *, min_len: int = 1, max_repeat_run: int = 8) -> dict:
+    """Compare une sortie candidate a une reference (meme prompt, idealement
+    meme seed) et signale une derive anormale. PAS un test de qualite
+    (aucune notion de "meilleur"), juste de la detection de divergence
+    grossiere -- collapse (sortie vide/tres courte), repetition pathologique
+    (meme token/mot N fois de suite), ou changement total de contenu.
+
+    Retourne {"ok": bool, "alerts": [str], "similarity": float 0..1}.
+    similarity = ratio de tokens (mots) communs, methode Jaccard simple --
+    volontairement naive, pas une metrique de qualite linguistique.
+    """
+    alerts = []
+    cand = (candidate_text or "").strip()
+    ref = (reference_text or "").strip()
+
+    if len(cand) < min_len:
+        alerts.append(f"sortie candidate trop courte ({len(cand)} caracteres, "
+                      f"seuil {min_len}) -- collapse possible (cf. incident "
+                      f"Q2_K -> EOS immediat, blast_radius=none)")
+
+    # repetition pathologique : le meme mot >= max_repeat_run fois de suite
+    words = cand.split()
+    run = 1
+    for i in range(1, len(words)):
+        if words[i] == words[i - 1]:
+            run += 1
+            if run >= max_repeat_run:
+                alerts.append(f"repetition pathologique detectee : "
+                              f"'{words[i]}' x{run} consecutifs")
+                break
+        else:
+            run = 1
+
+    similarity = 0.0
+    if ref:
+        ref_words, cand_words = set(ref.split()), set(cand.split())
+        union = ref_words | cand_words
+        similarity = len(ref_words & cand_words) / len(union) if union else 1.0
+        if similarity < 0.05 and ref_words and cand_words:
+            alerts.append(f"similarite quasi nulle avec la reference "
+                          f"({similarity:.2%}) -- changement total de contenu, "
+                          f"a verifier manuellement (pas force une corruption : "
+                          f"peut etre un changement legitime de prompt/seed)")
+
+    return {"ok": len(alerts) == 0, "alerts": alerts, "similarity": round(similarity, 4)}
+
+
+def render_sanity_check(result: dict) -> str:
+    if result["ok"]:
+        return f"[sanity-check] OK (similarite reference: {result['similarity']:.1%})"
+    lines = [f"[sanity-check] ⚠ {len(result['alerts'])} alerte(s) :"]
+    for a in result["alerts"]:
+        lines.append(f"  - {a}")
+    return "\n".join(lines)
+
+
 if __name__ == "__main__":
     import sys
     quant = sys.argv[1] if len(sys.argv) > 1 else None

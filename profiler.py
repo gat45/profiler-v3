@@ -78,6 +78,14 @@ import json
 import os
 import sys
 
+# Bug corrige (audit 2026-09-08) : console Windows par defaut en cp1252,
+# incapable d'afficher certains caracteres Unicode des rapports.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import profile_model as pm  # noqa: E402  (reutilise tout : lecture, analyse, L3)
 import predictor as pred  # noqa: E402  (regime device reel, gouverneur)
