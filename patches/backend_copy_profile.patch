@@ -1,0 +1,56 @@
+diff --git a/ggml/src/ggml-backend.cpp b/ggml/src/ggml-backend.cpp
+index fcb8187f..110a312f 100755
+--- a/ggml/src/ggml-backend.cpp
++++ b/ggml/src/ggml-backend.cpp
+@@ -25,6 +25,7 @@
+ #include <map>
+ #include <string>
+ #include <unordered_map>
++#include <chrono>
+ 
+ #ifdef __APPLE__
+ #include <sys/types.h>
+@@ -1771,6 +1772,24 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+             struct ggml_tensor * input = split->inputs[input_id];
+             struct ggml_tensor * input_cpy = tensor_copy(input, split_backend_id, sched->cur_copy);
+ 
++            // === PROFILER-V3 INSTRUMENTATION START (GGML_BACKEND_COPY_PROFILE) ===
++            // Ne couvre QUE le chemin synchrone ci-dessous (GGML_TENSOR_FLAG_INPUT).
++            // Le chemin async plus bas (cpy_tensor_async) n'est PAS instrumente
++            // par ce patch -- voir PATCHES.md.
++            static bool s_p3_copy_on = getenv("GGML_BACKEND_COPY_PROFILE") != nullptr;
++            static FILE * s_p3_copy_log = nullptr;
++            if (s_p3_copy_on && !s_p3_copy_log) {
++                s_p3_copy_log = fopen("backend_copy_profile.csv", "w");
++                if (s_p3_copy_log) {
++                    fprintf(s_p3_copy_log, "tensor,src_backend,dst_backend,bytes,duration_ms\n");
++                }
++            }
++            std::chrono::steady_clock::time_point p3_t0;
++            if (s_p3_copy_on) {
++                p3_t0 = std::chrono::steady_clock::now();
++            }
++            // === PROFILER-V3 INSTRUMENTATION END ===
++
+             if (input->flags & GGML_TENSOR_FLAG_INPUT) {
+                 // inputs from the user must be copied immediately to prevent the user overwriting the data before the copy is done
+                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {
+@@ -1779,6 +1798,18 @@ static enum ggml_status ggml_backend_sched_compute_splits(ggml_backend_sched_t s
+                     ggml_backend_synchronize(split_backend);
+                 }
+                 ggml_backend_tensor_copy(input, input_cpy);
++                // === PROFILER-V3 INSTRUMENTATION START ===
++                if (s_p3_copy_on && s_p3_copy_log) {
++                    double ms = std::chrono::duration<double, std::milli>(
++                        std::chrono::steady_clock::now() - p3_t0).count();
++                    fprintf(s_p3_copy_log, "%s,%s,%s,%zu,%.4f\n",
++                            input->name,
++                            ggml_backend_name(input_backend),
++                            ggml_backend_name(split_backend),
++                            ggml_nbytes(input), ms);
++                    fflush(s_p3_copy_log);
++                }
++                // === PROFILER-V3 INSTRUMENTATION END ===
+             } else {
+                 // wait for the split backend to finish using the input before overwriting it
+                 if (sched->events[split_backend_id][sched->cur_copy] != NULL) {

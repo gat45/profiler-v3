@@ -18,10 +18,25 @@ rien.
 
 ## `parse_backend_copy_profile.py` — patch exact
 
-**État actuel (2026-09-08) : ce patch n'est PAS présent dans le worktree de
-build courant (`ab-wt`)** — il a été appliqué une fois, le 2026-09-06, sur un
-arbre de build qui n'a pas été conservé tel quel. Ceci est documenté
-honnêtement plutôt que de fournir un diff qui ne correspondrait plus à rien.
+**Reconstitué et vérifié le 2026-09-08** (répond à l'issue #2) : le diff
+original (2026-09-06) avait été appliqué sur un arbre de build non
+conservé. `patches/backend_copy_profile.patch` est un patch RECONSTITUÉ
+depuis le code réel (`ggml/src/ggml-backend.cpp`, worktree `ab-wt`,
+`ggml_backend_sched_compute_splits`) — pas une reconstitution devinée :
+appliqué réellement sur le fichier, vérifié pour compiler syntaxiquement,
+regénéré via `git diff`, puis testé avec `git apply --check` (exit 0) sur
+un arbre propre avant d'être commité ici.
+
+```bash
+git apply patches/backend_copy_profile.patch   # depuis la racine du repo llama.cpp/ggml
+```
+
+**Limite honnête de ce patch** : il ne couvre QUE le chemin synchrone
+(`input->flags & GGML_TENSOR_FLAG_INPUT`, ligne ~1781 de
+`ggml-backend.cpp`). Le chemin asynchrone plus bas dans la même fonction
+(`cpy_tensor_async`, ~ligne 1878) n'est pas instrumenté — un run qui passe
+principalement par ce second chemin sous-comptera les copies réelles. Piste
+ouverte, pas encore fait.
 
 Ce qui est garanti stable (interface, pas implémentation) :
 - **Point d'accroche** : `ggml_backend_sched_compute_splits`, juste avant le
