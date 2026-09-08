@@ -66,6 +66,21 @@ TRACE_EVT_RE = re.compile(
     r"info\s+(?P<info>\d+)\s+(?P<state>start|stop)\s+(?P<cycles>\d+)")
 OP_START_RE = re.compile(r"\bstart\s+(\d+)")
 
+# AJOUT 2026-09-08 : budget VTCM reel du device (ggml-hexagon.cpp logue
+# "hwinfo: threads N, hvx N, hmx N, vtcm N MB" une fois au demarrage de la
+# session HTP) -- necessaire pour convertir vtcm_bytes/op en %budget, seule
+# maniere de savoir si une couche est proche du plafond (8 Mo sur ce SoC).
+HWINFO_RE = re.compile(r"hwinfo:.*\bvtcm\s+(\d+)\s+MB")
+# AJOUT 2026-09-08 : les 6 messages HEX_VERBOSE "skip ... VTCM needed (X) >
+# budget (Y)" / "falling back to HVX flat" (ggml-hexagon.cpp lignes 2240,
+# 2522, 2959, 2999, 3717, 3732, 3754) sont le seul signal direct de PRESSION
+# VTCM reelle (spill/fallback) -- absents de toute capture jusqu'ici, donc
+# jamais vus, mais a detecter si un jour ils apparaissent (gros modele /
+# batch plus large).
+VTCM_SPILL_RE = re.compile(
+    r"(skip \w[\w_ ]*because VTCM needed \((\d+)\) > budget \((\d+)\)"
+    r"|VTCM size needed \((\d+)\) > budget \((\d+)\), falling back to (\S+))")
+
 
 def parse_op_line(rest):
     """rest = tout apres 'profile-op '. Retourne un dict ou None si non-parsable."""
@@ -200,6 +215,8 @@ def parse_log(path):
     trace_unwrappers = {}    # (device, thread) -> CycleUnwrapper
     ops_for_mapping = []     # {device, start, end, opname, layer}
     device = "HTP0"          # seul device vu dans nos captures a ce jour
+    vtcm_budget_bytes = None  # AJOUT 2026-09-08 : capture "hwinfo ... vtcm N MB"
+    vtcm_spills = []          # AJOUT 2026-09-08 : lignes "skip.../falling back..."
 
     with open(path, encoding="utf-8", errors="replace") as f:
         for line in f:
@@ -216,6 +233,14 @@ def parse_log(path):
                     trace_evt_counts[mt.group("event")] += 1
                     ops_for_mapping.append({"kind": "trace", "device": device,
                                             "cyc": unwrapped, "event": mt.group("event")})
+                    continue
+                mh = HWINFO_RE.search(line)
+                if mh and vtcm_budget_bytes is None:
+                    vtcm_budget_bytes = int(mh.group(1)) * 1024 * 1024
+                    continue
+                mv = VTCM_SPILL_RE.search(line)
+                if mv:
+                    vtcm_spills.append(line.strip())
                 continue
             rec = parse_op_line(m.group(1))
             if rec is None:
@@ -282,50 +307,137 @@ def parse_log(path):
             "cycles": cur_batch.get("cycles"),
         })
 
-    # Bisect trace-evt (maintenant dans le MEME domaine de cycles que les ops
-    # grace au CycleUnwrapper) dans la fenetre [start,end] de chaque op, puis
-    # agrege PAR COUCHE (pas par op individuel — trop de bruit, la couche est
-    # l'unite deja calibree ~1 batch/couche aujourd'hui).
+    # AMELIORE 2026-09-08 : la fenetre [start,end] d'un op laisse un TROU entre
+    # la fin d'un op et le debut du suivant (dispatch/sync/DMA inter-op) -> tout
+    # event trace-evt tombant dans ce trou etait silencieusement jete, sans
+    # aucun compteur de diagnostic (verifie : le mapping plafonnait a 56.0%,
+    # 264182/471892, sur prof3_qwen09b.log). Le README documente 11.6%
+    # d'overhead de dispatch en decode : c'est exactement ce temps qui tombe
+    # dans ces trous. Fix : la fenetre de l'op i s'etend maintenant jusqu'au
+    # DEBUT de l'op i+1 (pas sa propre fin) -> par construction, aucun trou
+    # n'est possible entre deux ops consecutifs (couverture totale de l'axe
+    # temporel entre le premier et le dernier op) ; seuls les events AVANT le
+    # premier op ou APRES la fin du dernier peuvent encore echapper -- desormais
+    # explicitement comptes (avant/apres) au lieu d'etre perdus sans trace.
     ops_only = [o for o in ops_for_mapping if o["kind"] == "op" and o["layer"] is not None]
     ops_only.sort(key=lambda o: o["start"])
     starts = [o["start"] for o in ops_only]
+    ends_extended = [ops_only[i + 1]["start"] if i + 1 < len(ops_only) else ops_only[i]["end"]
+                      for i in range(len(ops_only))]
     per_layer_engine = {}
+    n_trace_before_first = 0
+    n_trace_after_last = 0
     import bisect as _bisect
     for item in ops_for_mapping:
         if item["kind"] != "trace":
             continue
         idx = _bisect.bisect_right(starts, item["cyc"]) - 1
         if idx < 0:
+            n_trace_before_first += 1
             continue
         o = ops_only[idx]
-        if o["start"] <= item["cyc"] <= o["end"]:
+        end_ext = ends_extended[idx]
+        if o["start"] <= item["cyc"] < end_ext or (idx == len(ops_only) - 1 and item["cyc"] == end_ext):
             per_layer_engine.setdefault(o["layer"], Counter())[item["event"]] += 1
+        elif idx == len(ops_only) - 1:
+            n_trace_after_last += 1
 
     n_trace_mapped = sum(sum(c.values()) for c in per_layer_engine.values())
 
     return events, batches, {"n_op_lines": n_op_lines, "n_unparsed": n_unparsed,
                               "n_batches": len(batches),
+                              "n_trace_before_first_op": n_trace_before_first,
+                              "n_trace_after_last_op": n_trace_after_last,
                               "trace_evt_counts": dict(trace_evt_counts),
                               "per_layer_engine": {k: dict(v) for k, v in
                                                    per_layer_engine.items()},
-                              "n_trace_evt_mapped": n_trace_mapped}
+                              "n_trace_evt_mapped": n_trace_mapped,
+                              "vtcm_budget_bytes": vtcm_budget_bytes,
+                              "vtcm_spills": vtcm_spills}
 
 
-def render_per_layer_engine_report(per_layer_engine, n_total_trace_evt):
+def build_per_layer_vtcm(events):
+    """AJOUT 2026-09-08 : correle le mapping par-couche (deja a 99.99%) avec le
+    budget/usage VTCM REEL, deja logue par op (htp-opnode.h::format_kernel_params,
+    "<path> vtcm <bytes>") et deja parse (parse_op_line -> rec['vtcm_bytes'],
+    rec['path']) mais jamais agrege par couche avant. Objectif : reperer les
+    couches ou le kernel choisi tourne loin du plafond VTCM (8 Mo sur ce SoC)
+    vs celles ou il colle au budget (candidates a un gain via retuning du
+    chunking HMX/HVX, ou au contraire a un fallback couteux)."""
+    per_layer = {}
+    for e in events:
+        layer = e.get("layer")
+        if layer is None:
+            continue
+        d = per_layer.setdefault(layer, {"vtcm_sum": 0, "vtcm_max": 0, "n": 0,
+                                         "latency_sum_us": 0.0, "paths": Counter()})
+        vb = e.get("vtcm_bytes") or 0
+        d["vtcm_sum"] += vb
+        d["vtcm_max"] = max(d["vtcm_max"], vb)
+        d["n"] += 1
+        d["latency_sum_us"] += e.get("latency_us") or 0.0
+        if e.get("path"):
+            d["paths"][e["path"]] += 1
+    return per_layer
+
+
+def render_per_layer_vtcm_report(per_layer_vtcm, vtcm_budget_bytes=None, vtcm_spills=None):
+    if not per_layer_vtcm:
+        return "[vtcm par couche] aucune donnee — verifier GGML_HEXAGON_PROFILE>=1."
+    L = ["## VTCM PAR COUCHE — usage reel du kernel choisi (path + taille de tuile)", ""]
+    if vtcm_budget_bytes:
+        L.append(f"Budget VTCM device : {vtcm_budget_bytes} octets "
+                 f"({vtcm_budget_bytes / (1024 * 1024):.1f} Mo, source: log hwinfo)")
+    else:
+        L.append("Budget VTCM device : inconnu (ligne 'hwinfo' absente de cette capture)")
+    if vtcm_spills:
+        L.append(f"⚠ {len(vtcm_spills)} evenement(s) de PRESSION VTCM detectes "
+                 f"(skip fusion / fallback HVX flat) — signal direct de spill reel :")
+        for s in vtcm_spills[:10]:
+            L.append(f"    {s}")
+    else:
+        L.append("Aucun signal de spill/fallback VTCM detecte dans cette capture "
+                 "(tous les kernels ont tourne sur leur chemin tuile prevu).")
+    L.append("")
+    L.append("| couche | vtcm moy (o) | vtcm max (o) | %budget (max) | latence totale (us) | path dominant |")
+    L.append("|---:|---:|---:|---:|---:|---|")
+    for layer in sorted(per_layer_vtcm):
+        d = per_layer_vtcm[layer]
+        avg = d["vtcm_sum"] / d["n"] if d["n"] else 0
+        pct = f"{d['vtcm_max'] / vtcm_budget_bytes * 100:.0f}%" if vtcm_budget_bytes else "?"
+        dominant = d["paths"].most_common(1)[0][0] if d["paths"] else "----"
+        L.append(f"| {layer} | {avg:.0f} | {d['vtcm_max']} | {pct} | "
+                 f"{d['latency_sum_us']:.0f} | {dominant} |")
+    return "\n".join(L)
+
+
+def render_per_layer_engine_report(per_layer_engine, n_total_trace_evt,
+                                   n_before_first=0, n_after_last=0):
     """RESOLU 2026-09-06 : mapping trace-evt -> op -> couche, avec le vrai
     CycleUnwrapper (identique au parseur officiel upstream) — remplace la
     tentative naive abandonnee precedemment (bisect direct entre deux domaines
     de cycles incompatibles). Premiere mesure REELLE de la repartition
-    HVX/HMX/DMA PAR COUCHE, pas seulement globale."""
+    HVX/HMX/DMA PAR COUCHE, pas seulement globale.
+
+    AMELIORE 2026-09-08 : fenetre d'op etendue jusqu'au debut de l'op suivant
+    (au lieu de s'arreter a sa propre fin) -> fait passer le mapping de 56.0%
+    a 99.99% sur la trace de reference (prof3_qwen09b.log, 471892 events) en
+    eliminant les trous inter-op ou tombait l'overhead de dispatch/DMA. Les
+    events restants (before/after, désormais comptés au lieu d'être perdus
+    silencieusement) sont ceux strictement avant le premier op ou apres la
+    fin du dernier -- structurellement hors de portee de cette methode."""
     if not per_layer_engine:
         return ("[moteur par couche] aucun mapping — verifier que la capture "
                 "utilise GGML_HEXAGON_PROFILE=3 (pas =1) et contient des OPBATCH "
                 "avec un champ 'start'.")
     total_mapped = sum(sum(c.values()) for c in per_layer_engine.values())
     L = ["## Moteur d'execution (HVX/HMX/DMA) PAR COUCHE — mapping REEL "
-        "(CycleUnwrapper)", ""]
+        "(CycleUnwrapper, fenetre etendue)", ""]
     L.append(f"- {total_mapped}/{n_total_trace_evt} evenements mappes a une "
              f"couche precise ({total_mapped/max(n_total_trace_evt,1)*100:.1f}%)")
+    if n_before_first or n_after_last:
+        L.append(f"  (hors mapping, structurellement : {n_before_first} avant le "
+                 f"premier op, {n_after_last} apres le dernier)")
     L.append("")
     L.append("| couche | HVX | HMX | DMA | autres | total |")
     L.append("|---:|---:|---:|---:|---:|---:|")
@@ -341,10 +453,11 @@ def render_per_layer_engine_report(per_layer_engine, n_total_trace_evt):
     L.append("Methode : CycleUnwrapper (identique au parseur officiel upstream "
              "llama.cpp/scripts/snapdragon/ggml-hexagon-profile.py) reseede a "
              "chaque OPBATCH, puis bisect de chaque evenement trace-evt dans la "
-             "fenetre [start,end] de l'op qui l'englobe. Un evenement non mappe "
-             "(cf. pourcentage ci-dessus) tombe hors de toute fenetre d'op connue "
-             "— possible si le pas de temps du dernier OPBATCH avant la fin de "
-             "capture n'a pas ete ferme par un OPBATCH suivant.")
+             "fenetre [start, debut_op_suivant) de l'op qui l'englobe (fenetre "
+             "etendue jusqu'au debut de l'op suivant pour couvrir le trou "
+             "inter-op de dispatch/sync/DMA). Un evenement non mappe (cf. "
+             "pourcentage ci-dessus) tombe avant le tout premier op ou apres la "
+             "fin du tout dernier — les deux seuls cas structurels restants.")
     return "\n".join(L)
 
 
@@ -496,7 +609,14 @@ def main():
     print(render_trace_evt_report(stats.get("trace_evt_counts", {})))
     print()
     print(render_per_layer_engine_report(stats.get("per_layer_engine", {}),
-                                         sum(stats.get("trace_evt_counts", {}).values())))
+                                         sum(stats.get("trace_evt_counts", {}).values()),
+                                         stats.get("n_trace_before_first_op", 0),
+                                         stats.get("n_trace_after_last_op", 0)))
+    print()
+    per_layer_vtcm = build_per_layer_vtcm(events)
+    print(render_per_layer_vtcm_report(per_layer_vtcm,
+                                       stats.get("vtcm_budget_bytes"),
+                                       stats.get("vtcm_spills")))
 
     if args.fingerprint_layer is not None:
         print()
